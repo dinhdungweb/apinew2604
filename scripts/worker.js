@@ -552,7 +552,18 @@ const syncProductsWorker = new Worker('scheduled-queue', async (job) => {
             }
             
             // Thời gian cập nhật gần đây
-            const lastUpdated = new Date(product.updatedAt || product.createdAt);
+            // Đảm bảo an toàn cho trường hợp không có updatedAt
+            let lastUpdated;
+            try {
+              // Kiểm tra trường updatedAt tồn tại và hợp lệ, nếu không sử dụng createdAt
+              lastUpdated = new Date(product.updatedAt ? product.updatedAt : (product.createdAt || new Date()));
+              if (isNaN(lastUpdated.getTime())) {
+                lastUpdated = new Date(product.createdAt || new Date());
+              }
+            } catch (error) {
+              lastUpdated = new Date(product.createdAt || new Date());
+            }
+            
             const now = new Date();
             const hoursSinceUpdate = (now.getTime() - lastUpdated.getTime()) / (1000 * 60 * 60);
             
@@ -568,7 +579,17 @@ const syncProductsWorker = new Worker('scheduled-queue', async (job) => {
             }
             
             // Sản phẩm mới tạo
-            const daysSinceCreation = (now.getTime() - new Date(product.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+            let creationDate;
+            try {
+              creationDate = new Date(product.createdAt || new Date());
+              if (isNaN(creationDate.getTime())) {
+                creationDate = new Date();
+              }
+            } catch (error) {
+              creationDate = new Date();
+            }
+            
+            const daysSinceCreation = (now.getTime() - creationDate.getTime()) / (1000 * 60 * 60 * 24);
             if (daysSinceCreation < 1) {
               score += 30;
             }
@@ -865,7 +886,7 @@ const syncProductsWorker = new Worker('scheduled-queue', async (job) => {
                   in: ['sync_inventory', 'schedule_inventory'] 
                 },
                 status: 'completed',
-                updatedAt: {
+                createdAt: {
                   gt: new Date(Date.now() - 10 * 60 * 1000) // 10 phút trước
                 }
               }
@@ -1167,7 +1188,18 @@ async function processSyncJob(job, forceSyncType = null) {
             }
             
             // Thời gian cập nhật gần đây
-            const lastUpdated = new Date(product.updatedAt || product.createdAt);
+            // Đảm bảo an toàn cho trường hợp không có updatedAt
+            let lastUpdated;
+            try {
+              // Kiểm tra trường updatedAt tồn tại và hợp lệ, nếu không sử dụng createdAt
+              lastUpdated = new Date(product.updatedAt ? product.updatedAt : (product.createdAt || new Date()));
+              if (isNaN(lastUpdated.getTime())) {
+                lastUpdated = new Date(product.createdAt || new Date());
+              }
+            } catch (error) {
+              lastUpdated = new Date(product.createdAt || new Date());
+            }
+            
             const now = new Date();
             const hoursSinceUpdate = (now.getTime() - lastUpdated.getTime()) / (1000 * 60 * 60);
             
@@ -1183,7 +1215,17 @@ async function processSyncJob(job, forceSyncType = null) {
             }
             
             // Sản phẩm mới tạo
-            const daysSinceCreation = (now.getTime() - new Date(product.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+            let creationDate;
+            try {
+              creationDate = new Date(product.createdAt || new Date());
+              if (isNaN(creationDate.getTime())) {
+                creationDate = new Date();
+              }
+            } catch (error) {
+              creationDate = new Date();
+            }
+            
+            const daysSinceCreation = (now.getTime() - creationDate.getTime()) / (1000 * 60 * 60 * 24);
             if (daysSinceCreation < 1) {
               score += 30;
             }
@@ -1480,7 +1522,7 @@ async function processSyncJob(job, forceSyncType = null) {
                   in: ['sync_inventory', 'schedule_inventory'] 
                 },
                 status: 'completed',
-                updatedAt: {
+                createdAt: {
                   gt: new Date(Date.now() - 10 * 60 * 1000) // 10 phút trước
                 }
               }
