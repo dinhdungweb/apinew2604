@@ -21,9 +21,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       success: true,
       cacheInfo: {
-        timestamp: cacheInfo.timestamp,
-        isExpired: cacheInfo.isExpired,
-        itemCount: cacheInfo.itemCount,
+      timestamp: cacheInfo.timestamp,
+      isExpired: cacheInfo.isExpired,
+      itemCount: cacheInfo.itemCount,
         cache: cacheInfo.cache
       }
     });
