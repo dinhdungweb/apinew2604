@@ -234,7 +234,7 @@ sudo mysql_secure_installation
 
 # Tạo database và user cho ứng dụng
 sudo mysql -e "CREATE DATABASE apimodern_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-sudo mysql -e "CREATE USER 'apimodern_user'@'localhost' IDENTIFIED BY 'mat_khau_an_toan';"
+sudo mysql -e "CREATE USER 'apimodern_user'@'localhost' IDENTIFIED BY 'Helios6789';"
 sudo mysql -e "GRANT ALL PRIVILEGES ON apimodern_db.* TO 'apimodern_user'@'localhost';"
 sudo mysql -e "FLUSH PRIVILEGES;"
 ```
@@ -456,4 +456,62 @@ pm2 monit
 
 # Xem trạng thái các dịch vụ
 pm2 status
+```
+
+### 16. Xử lý lỗi Migration Database
+
+Nếu bạn gặp lỗi migration như "Table doesn't exist" hoặc các vấn đề tương tự, hãy thử các cách sau:
+
+#### Cách 1: Sử dụng script reset migration
+
+```bash
+# Trên Linux/Ubuntu
+chmod +x scripts/reset-migration.sh
+./scripts/reset-migration.sh
+
+# Trên Windows
+.\scripts\reset-migration.ps1
+```
+
+#### Cách 2: Reset thủ công
+
+```bash
+# Xóa và tạo lại database
+sudo mysql -e "DROP DATABASE apimodern_db;"
+sudo mysql -e "CREATE DATABASE apimodern_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+sudo mysql -e "GRANT ALL PRIVILEGES ON apimodern_db.* TO 'apimodern_user'@'localhost';"
+sudo mysql -e "FLUSH PRIVILEGES;"
+
+# Chạy lại migration
+npx prisma migrate deploy
+```
+
+#### Cách 3: Tạo lại migrations từ đầu
+
+```bash
+# Xóa thư mục migrations hiện tại
+rm -rf prisma/migrations
+
+# Tạo migration mới dựa trên schema hiện tại
+npx prisma migrate dev --name init
+```
+
+#### Trường hợp lỗi "Access denied" cho MySQL
+
+Nếu gặp lỗi "Access denied for user" khi chạy migration:
+
+```bash
+# Cấp quyền đầy đủ cho user MySQL
+sudo mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'apimodern_user'@'localhost';"
+sudo mysql -e "FLUSH PRIVILEGES;"
+```
+
+#### Kiểm tra SQL Lỗi trong Migration
+
+```bash
+# Xem nội dung file migration
+cat prisma/migrations/[migration_name]/migration.sql
+
+# Chạy trực tiếp file SQL để kiểm tra lỗi
+sudo mysql apimodern_db < prisma/migrations/[migration_name]/migration.sql
 ```
