@@ -1,0 +1,56 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model ProductMapping {
+  id         Int      @id @default(autoincrement())
+  shopifyId  String   @unique
+  nhanhData  String   @db.Text // Lưu trữ dữ liệu Nhanh dưới dạng JSON
+  status     String?  // Trạng thái: "done", "error", hoặc null
+  errorMsg   String?  @db.Text // Thông báo lỗi nếu có
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  syncLogs   SyncLog[]
+}
+
+model User {
+  id         Int      @id @default(autoincrement())
+  username   String   @unique
+  password   String
+  email      String?
+  role       String   @default("editor")  // admin, editor, viewer
+  status     String   @default("active")  // active, inactive
+  lastLogin  DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model SyncLog {
+  id               Int      @id @default(autoincrement())
+  productMappingId Int?
+  productMapping   ProductMapping? @relation(fields: [productMappingId], references: [id])
+  action           String   // sync_inventory, sync_price, schedule_all, schedule_inventory, schedule_price
+  status           String   // success, error, scheduled, running, completed
+  message          String?
+  details          String?  @db.Text // JSON với thông tin chi tiết
+  createdAt        DateTime @default(now())
+  createdBy        String?  // username của người thực hiện
+}
+
+model Setting {
+  id          Int      @id @default(autoincrement())
+  key         String   @unique
+  value       String   @db.Text
+  description String?
+  group       String   @default("system")  // system, api, security
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
