@@ -562,10 +562,16 @@ async function checkSyncNeeded(product, nhanhData, settings) {
 
 /**
  * Hàm đồng bộ tồn kho
+ * @param {Object} product - Thông tin sản phẩm
+ * @param {Object} nhanhData - Dữ liệu từ Nhanh.vn
+ * @param {Object} settings - Cấu hình API
+ * @param {string} username - Người thực hiện đồng bộ
+ * @param {string} warehouseId - ID kho cần đồng bộ, mặc định là '175080'
+ * @returns {Promise<Object>} - Kết quả đồng bộ
  */
-async function syncInventory(product, nhanhData, settings, username = 'system') {
+async function syncInventory(product, nhanhData, settings, username = 'system', warehouseId = '175080') {
   // Debug logging
-  console.log(`[SYNC DEBUG] syncInventory called for product ID: ${product?.id || 'undefined'}, variantId: ${product?.shopifyId || 'undefined'}`);
+  console.log(`[SYNC DEBUG] syncInventory called for product ID: ${product?.id || 'undefined'}, variantId: ${product?.shopifyId || 'undefined'}, warehouseId: ${warehouseId}`);
 
   // Kiểm tra đầu vào
   if (!product || !product.id) {
@@ -632,6 +638,7 @@ async function syncInventory(product, nhanhData, settings, username = 'system') 
       
       // Lấy số lượng tồn kho từ Nhanh.vn
       let nhanhInventory = null;
+      let selectedWarehouseId = null;
       
       // Trích xuất inventory từ nhanhData theo cấu trúc đúng
       if (nhanhData) {
@@ -647,21 +654,43 @@ async function syncInventory(product, nhanhData, settings, username = 'system') 
             if ('remain' in inventoryData) {
               nhanhInventory = inventoryData.remain;
             } else if (inventoryData.depots) {
-              // Tính tổng từ các kho
-              let total = 0;
-              // Ưu tiên lấy từ kho 175080 nếu có
-              if (inventoryData.depots['175080'] && inventoryData.depots['175080'].available !== undefined) {
-                nhanhInventory = Number(inventoryData.depots['175080'].available || 0);
-                console.log(`[API] Lấy tồn kho từ kho 175080: ${nhanhInventory}`);
-              } else {
-                // Nếu không có kho 175080, tính tổng từ tất cả các kho
-                Object.values(inventoryData.depots).forEach(depot => {
+              // Tính tồn kho dựa trên ID kho
+              if (warehouseId === 'all') {
+                // Nếu yêu cầu lấy tổng từ tất cả kho
+                let total = 0;
+                Object.entries(inventoryData.depots).forEach(([depotId, depot]) => {
                   if (depot && typeof depot === 'object' && 'available' in depot) {
-                    total += Number(depot.available || 0);
+                    const depotValue = Number(depot.available || 0);
+                    if (!isNaN(depotValue)) {
+                      total += depotValue;
+                    }
                   }
                 });
                 nhanhInventory = total;
                 console.log(`[API] Lấy tổng tồn kho từ tất cả kho: ${nhanhInventory}`);
+              } else if (inventoryData.depots[warehouseId] && inventoryData.depots[warehouseId].available !== undefined) {
+                // Nếu tìm thấy kho cụ thể
+                nhanhInventory = Number(inventoryData.depots[warehouseId].available || 0);
+                selectedWarehouseId = warehouseId;
+                console.log(`[API] Lấy tồn kho từ kho ${warehouseId}: ${nhanhInventory}`);
+              } else if (inventoryData.depots['175080'] && inventoryData.depots['175080'].available !== undefined) {
+                // Fallback về kho mặc định 175080
+                nhanhInventory = Number(inventoryData.depots['175080'].available || 0);
+                selectedWarehouseId = '175080';
+                console.log(`[API] Không tìm thấy kho ${warehouseId}, fallback về kho mặc định 175080: ${nhanhInventory}`);
+              } else {
+                // Nếu không có cả kho cụ thể và kho mặc định, tính tổng
+                let total = 0;
+                Object.entries(inventoryData.depots).forEach(([depotId, depot]) => {
+                  if (depot && typeof depot === 'object' && 'available' in depot) {
+                    const depotValue = Number(depot.available || 0);
+                    if (!isNaN(depotValue)) {
+                      total += depotValue;
+                    }
+                  }
+                });
+                nhanhInventory = total;
+                console.log(`[API] Không tìm thấy kho ${warehouseId} hoặc kho mặc định, lấy tổng từ tất cả kho: ${nhanhInventory}`);
               }
             }
           }
@@ -1432,9 +1461,10 @@ async function updateOrder(id, orderData) {
  * @param {Array} products - Danh sách sản phẩm cần đồng bộ
  * @param {Object} settings - Cấu hình API
  * @param {string} username - Người thực hiện đồng bộ
+ * @param {string} warehouseId - ID kho cần đồng bộ, mặc định là '175080'
  * @returns {Promise<Object>} - Kết quả đồng bộ
  */
-async function batchSyncInventory(products, settings, username = 'system') {
+async function batchSyncInventory(products, settings, username = 'system', warehouseId = '175080') {
   const batchId = `BatchSync_${Date.now()}`;
   console.time(batchId);
   
@@ -1468,7 +1498,7 @@ async function batchSyncInventory(products, settings, username = 'system') {
           console.error(`[ERROR] Lỗi parse nhanhData cho sản phẩm ${product.id}:`, e.message);
         }
         
-        const result = await syncInventory(product, nhanhData, settings, username);
+        const result = await syncInventory(product, nhanhData, settings, username, warehouseId);
         if (result.skipped) {
           results.skipped++;
         } else {

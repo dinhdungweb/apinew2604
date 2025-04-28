@@ -13,6 +13,7 @@ import {
 import { toast } from 'react-toastify';
 import Card from '@/components/Card';
 import Button from '@/components/Button';
+import { cn } from '@/lib/utils';
 
 interface SyncStats {
   total: number;
@@ -59,9 +60,16 @@ export default function SyncPage() {
       progress: 0
     }
   });
-  const [syncType, setSyncType] = useState<'all' | 'inventory' | 'price' | 'orders'>('all');
+  const [syncType, setSyncType] = useState<string>('inventory');
+  const [syncAll, setSyncAll] = useState<boolean>(false);
+  const [isStarting, setIsStarting] = useState<boolean>(false);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [warehouseId, setWarehouseId] = useState<string>('175080');
+  const [warehouses, setWarehouses] = useState<{id: string, name: string}[]>([
+    {id: '175080', name: 'Kho mặc định (175080)'},
+    {id: 'all', name: 'Tất cả các kho'},
+  ]);
   const [refreshInterval, setRefreshInterval] = useState<NodeJS.Timeout | null>(null);
-  const [syncAll, setSyncAll] = useState(false);
 
   // Hàm kiểm tra trạng thái đồng bộ
   const checkSyncStatus = async () => {
@@ -107,40 +115,44 @@ export default function SyncPage() {
     };
   }, [token, router]);
 
-  // Hàm bắt đầu đồng bộ
   const startSync = async () => {
+    if (!token) {
+      toast.error('Vui lòng đăng nhập lại');
+      return;
+    }
+    
+    setIsStarting(true);
+    
     try {
-      setLoading(true);
-      
-      const response = await fetch('/api/sync/auto', {
+      const response = await fetch('/api/sync/manual', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           syncType,
-          syncAll
+          syncAll,
+          warehouseId
         })
       });
       
-      const data = await response.json();
-      
-      if (response.ok && data.success) {
-        toast.success('Đã bắt đầu quá trình đồng bộ tự động');
-        // Cập nhật giao diện
-        setStatus({
-          ...data,
-          inProgress: true
-        });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          toast.success('Đồng bộ đã được bắt đầu');
+          await checkSyncStatus();
+        } else {
+          toast.error(`Lỗi khi bắt đầu đồng bộ: ${data.message}`);
+        }
       } else {
-        toast.error(`Không thể bắt đầu đồng bộ: ${data.message || 'Không xác định'}`);
+        toast.error('Lỗi kết nối đến máy chủ');
       }
     } catch (error) {
-      console.error('Lỗi khi bắt đầu đồng bộ:', error);
-      toast.error('Lỗi khi kết nối với máy chủ');
+      console.error('Error starting sync:', error);
+      toast.error('Lỗi khi bắt đầu đồng bộ');
     } finally {
-      setLoading(false);
+      setIsStarting(false);
     }
   };
 
@@ -195,18 +207,19 @@ export default function SyncPage() {
           description="Đồng bộ hàng loạt sản phẩm giữa Shopify và Nhanh.vn"
           actions={
             <div className="flex gap-3">
-              <button
-                className="px-4 py-2 bg-gray-100 text-gray-700 hover:bg-gray-200 rounded-lg shadow-sm text-sm font-medium flex items-center transition-colors"
+              <Button 
+                variant="outline" 
                 onClick={checkSyncStatus}
-                disabled={loading}
+                className={cn("flex items-center gap-1", isRefreshing && "animate-spin")}
+                disabled={isRefreshing}
               >
-                <RefreshCw className="w-4 h-4 mr-2" />
-                Làm mới
-              </button>
+                <RefreshCw className={cn("h-4 w-4", isRefreshing && "animate-spin")} />
+                <span>Làm mới</span>
+              </Button>
               <button
                 className="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg shadow-sm text-sm font-medium flex items-center transition-colors"
                 onClick={startSync}
-                disabled={status.inProgress || loading}
+                disabled={status.inProgress || isStarting}
               >
                 {status.inProgress ? (
                   <StopCircle className="w-4 h-4 mr-2" />
@@ -246,6 +259,23 @@ export default function SyncPage() {
                     <option value="inventory">Chỉ đồng bộ tồn kho</option>
                     <option value="price">Chỉ đồng bộ giá</option>
                     <option value="orders">Đơn hàng</option>
+                  </select>
+                </div>
+                
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Kho đồng bộ
+                  </label>
+                  <select
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={warehouseId}
+                    onChange={(e) => setWarehouseId(e.target.value)}
+                  >
+                    {warehouses.map(warehouse => (
+                      <option key={warehouse.id} value={warehouse.id}>
+                        {warehouse.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 

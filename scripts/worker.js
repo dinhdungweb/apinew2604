@@ -511,7 +511,11 @@ const syncProductsWorker = new Worker('scheduled-queue', async (job) => {
             throw new Error('Thiếu cấu hình Shopify (store hoặc access token)');
           }
           
-          const result = await batchSyncInventory(products, configSettings, username);
+          // Sử dụng warehouseId từ job data hoặc mặc định từ configSettings
+          const syncWarehouseId = job.data.warehouseId || configSettings.nhanh_warehouse_id || '175080';
+          console.log(`[Worker] Sử dụng kho ${syncWarehouseId} cho đồng bộ tồn kho`);
+          
+          const result = await batchSyncInventory(products, configSettings, username, syncWarehouseId);
           
           stats.success = result.success;
           stats.error = result.error;
@@ -1004,7 +1008,11 @@ const priceSyncWorker = new Worker('price-sync-queue', async (job) => {
 
 // Tạo hàm chung xử lý đồng bộ để tái sử dụng code
 async function processSyncJob(job, forceSyncType = null) {
-  const { syncType: originalSyncType, username, syncAllProducts, productIds, scheduledLogId } = job.data;
+  const { syncType: originalSyncType, username, syncAllProducts, productIds, scheduledLogId, warehouseId } = job.data;
+  
+  // Log chi tiết dữ liệu công việc
+  console.log(`[Worker] Bắt đầu xử lý công việc đồng bộ: type=${originalSyncType}, user=${username}, all=${syncAllProducts}, warehouseId=${warehouseId || 'default'}`);
+  
   const syncType = forceSyncType || originalSyncType;
   
   // Bắt đầu đo metrics
@@ -1147,7 +1155,11 @@ async function processSyncJob(job, forceSyncType = null) {
             throw new Error('Thiếu cấu hình Shopify (store hoặc access token)');
           }
           
-          const result = await batchSyncInventory(products, configSettings, username);
+          // Sử dụng warehouseId từ job data hoặc mặc định từ configSettings
+          const syncWarehouseId = warehouseId || configSettings.nhanh_warehouse_id || '175080';
+          console.log(`[Worker] Sử dụng kho ${syncWarehouseId} cho đồng bộ tồn kho`);
+          
+          const result = await batchSyncInventory(products, configSettings, username, syncWarehouseId);
           
           stats.success = result.success;
           stats.error = result.error;

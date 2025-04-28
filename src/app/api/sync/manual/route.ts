@@ -59,6 +59,9 @@ export async function POST(req: NextRequest) {
     // Lấy dữ liệu từ body request
     let productId = null;
     let syncTypeValue = null;
+    let warehouseId = '175080'; // Mặc định kho 175080
+    let syncAllProducts = false;
+    
     try {
       const body = await req.json();
       if (body.productId) {
@@ -67,6 +70,12 @@ export async function POST(req: NextRequest) {
       if (body && typeof body.syncType === 'string' && 
           ['all', 'inventory', 'price', 'orders'].includes(body.syncType)) {
         syncTypeValue = body.syncType;
+      }
+      if (body && typeof body.warehouseId === 'string') {
+        warehouseId = body.warehouseId;
+      }
+      if (body && typeof body.syncAll === 'boolean') {
+        syncAllProducts = body.syncAll;
       }
     } catch (error) {
       console.log('No body provided, using defaults');
@@ -147,17 +156,73 @@ export async function POST(req: NextRequest) {
       }
     } else if (productMapping) {
       // Đồng bộ một sản phẩm cụ thể
-      const result = await syncProduct(productMapping, apiSettings, String(payload.username || 'system'));
+      const result = await syncProduct(productMapping, apiSettings, String(payload.username || 'system'), warehouseId);
       syncResults.push(result);
     } else {
-      // Đồng bộ tất cả sản phẩm - lấy 10 sản phẩm đầu tiên để test - sử dụng Prisma Client
-      const products = await prisma.productMapping.findMany({
-        take: 10
-      });
-      
-      for (const product of products) {
-        const result = await syncProduct(product, apiSettings, String(payload.username || 'system'));
-        syncResults.push(result);
+      // Đồng bộ bằng worker nếu không chỉ định sản phẩm cụ thể
+      try {
+        // Tạo mã tác vụ
+        const jobId = Date.now().toString();
+        
+        // Thêm tác vụ vào queue
+        const Bull = require('bullmq');
+        const Redis = require('ioredis');
+        
+        // Kết nối Redis
+        const redisConnection = new Redis({
+          host: process.env.REDIS_HOST || 'localhost',
+          port: parseInt(process.env.REDIS_PORT || '6379', 10)
+        });
+        
+        // Chọn queue dựa trên loại đồng bộ
+        let queueName = 'scheduled-queue';
+        if (syncTypeValue === 'inventory') queueName = 'inventory-sync-queue';
+        if (syncTypeValue === 'price') queueName = 'price-sync-queue';
+        
+        const queue = new Bull.Queue(queueName, { connection: redisConnection });
+        
+        // Thêm tác vụ vào queue
+        await queue.add('sync-products', {
+          syncType: syncTypeValue || 'inventory',
+          username: String(payload.username || 'system'),
+          syncAllProducts: syncAllProducts,
+          scheduledLogId: null,
+          warehouseId: warehouseId
+        }, {
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 1000
+          }
+        });
+        
+        // Tạo log tác vụ
+        await prisma.syncLog.create({
+          data: {
+            action: `schedule_${syncTypeValue || 'inventory'}`,
+            status: 'scheduled',
+            message: `Lên lịch đồng bộ ${syncTypeValue || 'inventory'} thủ công`,
+            details: JSON.stringify({
+              scheduledTime: new Date().toISOString(),
+              username: String(payload.username || 'system'),
+              syncAllProducts,
+              warehouseId
+            }),
+            createdBy: String(payload.username || 'system')
+          }
+        });
+        
+        return NextResponse.json({
+          success: true,
+          message: 'Đã thêm tác vụ đồng bộ vào hàng đợi'
+        });
+        
+      } catch (error: any) {
+        console.error(`[API] Lỗi khi thêm tác vụ đồng bộ vào queue:`, error);
+        return NextResponse.json({
+          success: false,
+          message: `Lỗi khi thêm tác vụ đồng bộ: ${error.message}`
+        }, { status: 500 });
       }
     }
 
@@ -187,7 +252,8 @@ async function getApiSettings() {
             'shopify_location_id',
             'nhanh_api_key',
             'nhanh_business_id',
-            'nhanh_app_id'
+            'nhanh_app_id',
+            'nhanh_warehouse_id'
           ]
         }
       }
@@ -204,7 +270,8 @@ async function getApiSettings() {
       shopify_location_id: apiSettings.shopify_location_id || process.env.SHOPIFY_LOCATION_ID || '',
       nhanh_api_key: apiSettings.nhanh_api_key || process.env.NHANH_API_KEY || '',
       nhanh_business_id: apiSettings.nhanh_business_id || process.env.NHANH_BUSINESS_ID || '',
-      nhanh_app_id: apiSettings.nhanh_app_id || process.env.NHANH_APP_ID || ''
+      nhanh_app_id: apiSettings.nhanh_app_id || process.env.NHANH_APP_ID || '',
+      nhanh_warehouse_id: apiSettings.nhanh_warehouse_id || process.env.NHANH_WAREHOUSE_ID || '175080'
     };
   } catch (error) {
     console.error('Error getting API settings:', error);
@@ -215,13 +282,14 @@ async function getApiSettings() {
       shopify_location_id: process.env.SHOPIFY_LOCATION_ID || '',
       nhanh_api_key: process.env.NHANH_API_KEY || '',
       nhanh_business_id: process.env.NHANH_BUSINESS_ID || '',
-      nhanh_app_id: process.env.NHANH_APP_ID || ''
+      nhanh_app_id: process.env.NHANH_APP_ID || '',
+      nhanh_warehouse_id: process.env.NHANH_WAREHOUSE_ID || '175080'
     };
   }
 }
 
 // Hàm đồng bộ một sản phẩm
-async function syncProduct(product: any, apiSettings: Record<string, string>, username: string) {
+async function syncProduct(product: any, apiSettings: Record<string, string>, username: string, warehouseId: string = '175080') {
   try {
     // Lấy dữ liệu sản phẩm từ Shopify
     const shopifyData = await getShopifyProduct(product.shopifyId, apiSettings);
@@ -229,69 +297,15 @@ async function syncProduct(product: any, apiSettings: Record<string, string>, us
     // Phân tích dữ liệu Nhanh.vn từ trường nhanhData
     const nhanhData = JSON.parse(product.nhanhData);
     
-    // Thực hiện đồng bộ dữ liệu - Trong trường hợp này, chúng ta giả lập việc đồng bộ
-    const syncSuccess = Math.random() > 0.2; // 80% xác suất thành công
-    const syncMessage = syncSuccess 
-      ? 'Đồng bộ thành công' 
-      : 'Lỗi khi đồng bộ dữ liệu';
+    // Thực hiện đồng bộ sản phẩm với syncInventory của syncService
+    const { syncInventory } = require('@/lib/syncService.js');
+    const result = await syncInventory(product, nhanhData, apiSettings, username, warehouseId);
     
-    // Tạo chi tiết đồng bộ
-    const syncDetails = {
-      shopify: {
-        id: String(shopifyData.id),
-        title: shopifyData.title || 'Sản phẩm Shopify',
-        inventory: Number(shopifyData.variants[0].inventory_quantity || 0),
-        price: String(shopifyData.variants[0].price)
-      },
-      nhanh: {
-        id: String(nhanhData.idNhanh || 'unknown'),
-        title: nhanhData.name || 'Sản phẩm Nhanh',
-        inventory: Number(nhanhData.inventory || 0),
-        price: String(nhanhData.price || 0)
-      },
-      productName: nhanhData.name || shopifyData.title || `Sản phẩm #${product.shopifyId}`
-    };
-
-    // Tạo bản ghi SyncLog bằng Prisma ORM thay vì raw SQL
-    await prisma.syncLog.create({
-      data: {
-        productMappingId: product.id,
-        action: 'sync_inventory',
-        status: syncSuccess ? 'success' : 'error',
-        message: syncMessage,
-        details: JSON.stringify(syncDetails),
-        createdBy: username
-      }
-    });
-
-    // Lấy ID của SyncLog vừa tạo bằng Prisma
-    const recentSyncLogs = await prisma.syncLog.findMany({
-      where: {
-        productMappingId: product.id
-      },
-      orderBy: {
-        createdAt: 'desc'
-      },
-      take: 1
-    });
-    const newSyncLog = recentSyncLogs.length > 0 ? recentSyncLogs[0] : null;
-
-    // Cập nhật trạng thái sản phẩm bằng Prisma
-    await prisma.productMapping.update({
-      where: {
-        id: product.id
-      },
-      data: {
-        status: syncSuccess ? 'success' : 'error',
-        errorMsg: syncSuccess ? null : syncMessage
-      }
-    });
-
     return {
       productId: product.shopifyId,
-      syncId: newSyncLog?.id || 0,
-      success: syncSuccess,
-      message: syncMessage
+      success: true,
+      message: 'Đồng bộ sản phẩm thành công',
+      details: result
     };
   } catch (error: any) {
     console.error(`Error syncing product ${product.id}:`, error.message);
