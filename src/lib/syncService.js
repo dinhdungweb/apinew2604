@@ -649,12 +649,20 @@ async function syncInventory(product, nhanhData, settings, username = 'system') 
             } else if (inventoryData.depots) {
               // Tính tổng từ các kho
               let total = 0;
-              Object.values(inventoryData.depots).forEach(depot => {
-                if (depot && typeof depot === 'object' && 'available' in depot) {
-                  total += Number(depot.available || 0);
-                }
-              });
-              nhanhInventory = total;
+              // Ưu tiên lấy từ kho 175080 nếu có
+              if (inventoryData.depots['175080'] && inventoryData.depots['175080'].available !== undefined) {
+                nhanhInventory = Number(inventoryData.depots['175080'].available || 0);
+                console.log(`[API] Lấy tồn kho từ kho 175080: ${nhanhInventory}`);
+              } else {
+                // Nếu không có kho 175080, tính tổng từ tất cả các kho
+                Object.values(inventoryData.depots).forEach(depot => {
+                  if (depot && typeof depot === 'object' && 'available' in depot) {
+                    total += Number(depot.available || 0);
+                  }
+                });
+                nhanhInventory = total;
+                console.log(`[API] Lấy tổng tồn kho từ tất cả kho: ${nhanhInventory}`);
+              }
             }
           }
         } else if (product.inventory) {
