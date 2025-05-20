@@ -295,7 +295,18 @@ async function syncProduct(product: any, apiSettings: Record<string, string>, us
     const shopifyData = await getShopifyProduct(product.shopifyId, apiSettings);
     
     // Phân tích dữ liệu Nhanh.vn từ trường nhanhData
-    const nhanhData = JSON.parse(product.nhanhData);
+    let nhanhData;
+    try {
+      nhanhData = typeof product.nhanhData === 'string' 
+        ? JSON.parse(product.nhanhData) 
+        : product.nhanhData;
+    } catch (parseError) {
+      console.error(`Lỗi parse nhanhData cho sản phẩm ${product.id}:`, parseError.message);
+      nhanhData = { idNhanh: product.externalId || product.id };
+    }
+    
+    // Log thông tin trước khi đồng bộ để debug
+    console.log(`[Manual Sync] Đồng bộ sản phẩm ${product.id}, shopifyId: ${product.shopifyId}, warehouseId: ${warehouseId}`);
     
     // Thực hiện đồng bộ sản phẩm với syncInventory của syncService
     const { syncInventory } = require('@/lib/syncService.js');

@@ -79,343 +79,191 @@ async function getNhanhData(nhanhId, settings) {
 }
 
 /**
- * Circuit breaker để ngăn chặn lỗi hàng loạt
+ * Lấy số lượng tồn kho từ dữ liệu Nhanh.vn với xử lý nhất quán
+ * @param {Object} nhanhData - Dữ liệu từ Nhanh.vn 
+ * @param {string} warehouseId - Mã kho cần lấy tồn kho (mặc định: 175080)
+ * @param {string} productId - ID sản phẩm, chỉ dùng cho việc log
+ * @returns {number} - Số lượng tồn kho (luôn là số nguyên không âm)
  */
-const circuitBreaker = {
-  failures: 0,
-  threshold: 10,
-  resetTimeout: 60000, // 1 phút
-  lastFailure: null,
-  state: 'CLOSED', // CLOSED, OPEN, HALF_OPEN
+function getInventoryQuantity(nhanhData, warehouseId = '175080', productId = 'unknown') {
+  console.log(`[INVENTORY] Bắt đầu lấy tồn kho cho sản phẩm ${productId}, warehouseId: ${warehouseId}`);
   
-  recordSuccess() {
-    if (this.state === 'HALF_OPEN') {
-      this.reset();
-    }
-  },
-  
-  recordFailure() {
-    this.failures++;
-    this.lastFailure = Date.now();
-    
-    if (this.failures >= this.threshold) {
-      this.state = 'OPEN';
-      console.log(`[CircuitBreaker] Chuyển sang trạng thái OPEN sau ${this.failures} lỗi liên tiếp`);
-      
-      setTimeout(() => {
-        this.state = 'HALF_OPEN';
-        this.failures = Math.floor(this.threshold / 2);
-        console.log(`[CircuitBreaker] Chuyển sang trạng thái HALF_OPEN sau ${this.resetTimeout/1000}s`);
-      }, this.resetTimeout);
-    }
-  },
-  
-  canProceed() {
-    return this.state !== 'OPEN';
-  },
-  
-  reset() {
-    this.failures = 0;
-    this.state = 'CLOSED';
-    console.log(`[CircuitBreaker] Đã reset về trạng thái CLOSED`);
-  }
-};
+  // Khởi tạo số lượng mặc định là 0
+  let inventoryQuantity = 0;
 
-/**
- * Hàm gọi Shopify API với xử lý retry, timeout và circuit breaker
- */
-async function callShopifyAPI(url, options, maxRetries = 3, timeout = 20000) {
-  // Kiểm tra circuit breaker
-  if (!circuitBreaker.canProceed()) {
-    throw new Error('Circuit breaker đang mở, không thể gọi API. Hãy thử lại sau.');
-  }
-  
-  let retries = 0;
-  let lastError;
-
-  // Hàm tính toán thời gian backoff tăng dần
-  const getBackoffTime = (retry) => {
-    const baseTime = Math.pow(1.5, retry) * 1000; // 1s, 1.5s, 2.25s, 3.38s, ... (giảm so với 2^n)
-    const jitter = Math.random() * 500; // Giảm jitter để giảm thời gian chờ
-    return Math.min(baseTime + jitter, 20000); // Tối đa 20s thay vì 30s
-  };
-
-  while (retries < maxRetries) {
-    try {
-      // Tạo AbortController để quản lý timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-      
-      // Thêm signal vào options
-      const optionsWithSignal = {
-        ...options,
-        signal: controller.signal
-      };
-      
-      // Thực hiện gọi API
-      const startTime = Date.now();
-      const response = await fetch(url, optionsWithSignal);
-      const callDuration = Date.now() - startTime;
-      
-      // Xóa timeout
-      clearTimeout(timeoutId);
-      
-      // Xử lý theo mã phản hồi
-      if (response.status === 429) {
-        // Rate limit - lấy thời gian từ header
-        const retryAfter = parseInt(response.headers.get('Retry-After') || '5', 10);
-        const delay = retryAfter * 1000;
-        
-        console.log(`[API] Rate limited (429), đợi ${retryAfter}s và thử lại (lần ${retries + 1}/${maxRetries})`);
-        await sleep(delay);
-        retries++;
-        continue;
-      }
-      
-      if (response.status >= 500) {
-        // Lỗi server - thử lại sau backoff
-        const delay = getBackoffTime(retries);
-        console.log(`[API] Lỗi server ${response.status}, đợi ${(delay/1000).toFixed(1)}s và thử lại (lần ${retries + 1}/${maxRetries})`);
-        await sleep(delay);
-        retries++;
-        
-        // Ghi nhận lỗi vào circuit breaker
-        circuitBreaker.recordFailure();
-        continue;
-      }
-      
-      if (response.status === 401 || response.status === 403) {
-        // Lỗi xác thực - có thể cần làm mới token
-        console.error(`[API] Lỗi xác thực: ${response.status}`);
-        circuitBreaker.recordFailure();
-        throw new Error(`Lỗi xác thực API: ${response.status}`);
-      }
-      
-      // Ghi nhận thành công vào circuit breaker
-      circuitBreaker.recordSuccess();
-      
-      // Ghi log chi tiết thời gian gọi API
-      console.log(`[API] Gọi thành công, thời gian: ${callDuration}ms, status: ${response.status}`);
-      
-      return response;
-      
-    } catch (error) {
-      // Xóa timeout nếu có
-      clearTimeout();
-      
-      lastError = error;
-      retries++;
-      
-      // Phân loại lỗi
-      if (error.name === 'AbortError') {
-        console.log(`[API] Timeout sau ${timeout}ms, thử lại lần ${retries}/${maxRetries}`);
-      } else {
-        console.log(`[API] Lỗi kết nối: ${error.message}, thử lại lần ${retries}/${maxRetries}`);
-      }
-      
-      // Ghi nhận lỗi vào circuit breaker
-      circuitBreaker.recordFailure();
-      
-      if (retries < maxRetries) {
-        const delay = getBackoffTime(retries);
-        console.log(`[API] Đợi ${(delay/1000).toFixed(1)}s và thử lại`);
-        await sleep(delay);
-      }
-    }
-  }
-  
-  // Tạo thông báo lỗi chi tiết
-  const errorMessage = lastError 
-    ? `${lastError.message} (sau ${maxRetries} lần thử)` 
-    : `Không thể kết nối đến Shopify API sau ${maxRetries} lần thử`;
-  
-  throw new Error(errorMessage);
-}
-
-/**
- * Cache đơn giản cho dữ liệu API
- */
-const apiCache = {
-  data: new Map(),
-  
-  get(key) {
-    const item = this.data.get(key);
-    if (!item) return null;
-    
-    // Kiểm tra hết hạn
-    if (Date.now() > item.expiry) {
-      this.data.delete(key);
-      return null;
-    }
-    
-    return item.value;
-  },
-  
-  set(key, value, ttlMs = 300000) { // Mặc định cache 5 phút (tăng từ 1 phút)
-    this.data.set(key, {
-      value,
-      expiry: Date.now() + ttlMs
-    });
-  },
-  
-  invalidate(key) {
-    this.data.delete(key);
-  },
-  
-  clear() {
-    this.data.clear();
-  },
-  
-  stats() {
-    let expired = 0;
-    const now = Date.now();
-    
-    this.data.forEach(item => {
-      if (now > item.expiry) expired++;
-    });
-    
-    return {
-      total: this.data.size,
-      expired,
-      active: this.data.size - expired
-    };
-  }
-};
-
-/**
- * Hàm lấy thông tin sản phẩm/biến thể từ Shopify
- * shopifyId ở đây là Variant ID
- */
-async function getShopifyProduct(shopifyId, settings, useCache = true) {
-  // Validate settings first
-  if (!settings) {
-    console.error('[API ERROR] Thiếu object settings khi gọi getShopifyProduct');
-    throw new Error('Thiếu cấu hình Shopify (settings object is undefined)');
-  }
-  
-  const SHOPIFY_STORE = settings.shopify_store;
-  const SHOPIFY_ACCESS_TOKEN = settings.shopify_access_token;
-  
-  // Log debug info
-  console.log(`[API DEBUG] getShopifyProduct called with ID: ${shopifyId}, settings: ${!!settings}, store: ${SHOPIFY_STORE || 'missing'}`);
-  
-  // Kiểm tra tính hợp lệ của tham số
-  if (!shopifyId) {
-    throw new Error('Shopify ID không được để trống');
-  }
-  
-  if (!SHOPIFY_STORE || !SHOPIFY_ACCESS_TOKEN) {
-    throw new Error('Thiếu cấu hình Shopify (store hoặc access token)');
-  }
-  
-  // Chuẩn hóa shopifyId - loại bỏ tiền tố gid:// nếu có
-  const normalizedId = shopifyId.includes('gid://') ? shopifyId.split('/').pop() : shopifyId;
-  
-  // Thử lấy từ cache nếu được yêu cầu
-  const cacheKey = `shopify_variant_${normalizedId}`;
-  if (useCache) {
-    const cachedData = apiCache.get(cacheKey);
-    if (cachedData) {
-      console.log(`[Cache] Lấy thông tin biến thể ${normalizedId} từ cache`);
-      return cachedData;
-    }
-  }
-  
-  // Không có trong cache, gọi API
-  console.log(`[API] Đang lấy thông tin biến thể Shopify, Variant ID: ${normalizedId}`);
-  
   try {
-    // Sử dụng endpoint variant thay vì product
-    const variantResponse = await callShopifyAPI(
-      `https://${SHOPIFY_STORE}.myshopify.com/admin/api/2024-01/variants/${normalizedId}.json`,
-      {
-        method: 'GET',
-        headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-          'Content-Type': 'application/json'
-        }
+    // Kiểm tra cấu trúc dữ liệu  
+    if (!nhanhData) {
+      console.log(`[INVENTORY] Dữ liệu Nhanh.vn không tồn tại cho sản phẩm ${productId}`);
+      return 0;
+    }
+
+    // Lấy dữ liệu inventory từ nhanhData
+    const inventory = nhanhData.inventory;
+    
+    // Nếu không có dữ liệu inventory
+    if (!inventory) {
+      console.log(`[INVENTORY] Không có dữ liệu tồn kho cho sản phẩm ${productId}`);
+      return 0;
+    }
+    
+    // TRƯỜNG HỢP 1: Nếu inventory là số, sử dụng trực tiếp
+    if (typeof inventory === 'number') {
+      inventoryQuantity = inventory;
+      console.log(`[INVENTORY] Lấy tồn kho trực tiếp (số): ${inventoryQuantity}`);
+    }
+    // TRƯỜNG HỢP 2: Nếu inventory có trường remain
+    else if (typeof inventory === 'object' && inventory !== null && 'remain' in inventory) {
+      inventoryQuantity = Number(inventory.remain);
+      console.log(`[INVENTORY] Lấy tồn kho từ trường remain: ${inventoryQuantity}`);
+    }
+    // TRƯỜNG HỢP 3: Nếu inventory có depots (nhiều kho)
+    else if (typeof inventory === 'object' && inventory !== null && inventory.depots) {
+      if (warehouseId === 'all') {
+        // Nếu yêu cầu tất cả kho, tính tổng
+        let total = 0;
+        Object.entries(inventory.depots).forEach(([depotId, depot]) => {
+          if (depot && typeof depot === 'object' && 'available' in depot) {
+            const depotValue = Number(depot.available || 0);
+            if (!isNaN(depotValue)) {
+              total += depotValue;
+            }
+          }
+        });
+        inventoryQuantity = total;
+        console.log(`[INVENTORY] Lấy tổng tồn kho từ tất cả kho: ${inventoryQuantity}`);
+      } 
+      // Nếu tìm thấy kho cụ thể theo warehouseId
+      else if (inventory.depots[warehouseId] && 'available' in inventory.depots[warehouseId]) {
+        inventoryQuantity = Number(inventory.depots[warehouseId].available || 0);
+        console.log(`[INVENTORY] Lấy tồn kho từ kho ${warehouseId}: ${inventoryQuantity}`);
       }
-    );
-    
-    if (!variantResponse.ok) {
-      if (variantResponse.status === 404) {
-        throw new Error(`Biến thể ${normalizedId} không tồn tại trên Shopify`);
+      // Fallback về kho mặc định 175080 nếu không tìm thấy kho yêu cầu
+      else if (inventory.depots['175080'] && 'available' in inventory.depots['175080']) {
+        inventoryQuantity = Number(inventory.depots['175080'].available || 0);
+        console.log(`[INVENTORY] Không tìm thấy kho ${warehouseId}, fallback về kho mặc định 175080: ${inventoryQuantity}`);
       }
-      const errorText = await variantResponse.text();
-      throw new Error(`Lỗi API Shopify: ${variantResponse.status} - ${errorText}`);
+      // Nếu không có cả kho cụ thể và kho mặc định, tính tổng tất cả kho
+      else {
+        let total = 0;
+        Object.entries(inventory.depots).forEach(([depotId, depot]) => {
+          if (depot && typeof depot === 'object' && 'available' in depot) {
+            const depotValue = Number(depot.available || 0);
+            if (!isNaN(depotValue)) {
+              total += depotValue;
+            }
+          }
+        });
+        inventoryQuantity = total;
+        console.log(`[INVENTORY] Không tìm thấy kho ${warehouseId} hoặc kho mặc định, lấy tổng từ tất cả kho: ${inventoryQuantity}`);
+      }
+    }
+    // TRƯỜNG HỢP 4: Nếu inventory là string hoặc cấu trúc khác, chuyển đổi thành số
+    else {
+      inventoryQuantity = Number(inventory);
+      console.log(`[INVENTORY] Chuyển đổi tồn kho từ ${typeof inventory}: ${inventoryQuantity}`);
     }
     
-    const variantData = await variantResponse.json();
-    
-    // Kiểm tra dữ liệu trả về
-    if (!variantData || !variantData.variant) {
-      throw new Error(`Không thể lấy dữ liệu biến thể Shopify (ID: ${normalizedId})`);
+    // Đảm bảo inventoryQuantity là số hợp lệ
+    if (isNaN(inventoryQuantity)) {
+      console.log(`[INVENTORY] Tồn kho không hợp lệ (NaN) cho sản phẩm ${productId}, đặt về 0`);
+      inventoryQuantity = 0;
     }
     
-    // Đảm bảo inventoryItemId tồn tại
-    if (!variantData.variant.inventory_item_id) {
-      throw new Error(`Biến thể ${normalizedId} không có inventory_item_id`);
-    }
+    // Đảm bảo inventoryQuantity là số nguyên không âm
+    inventoryQuantity = Math.max(0, Math.floor(inventoryQuantity));
+    console.log(`[INVENTORY] Giá trị tồn kho cuối cùng cho sản phẩm ${productId}: ${inventoryQuantity}`);
     
-    // Log thành công
-    console.log(`[API] Đã lấy thông tin biến thể Shopify thành công, ID: ${normalizedId}, Product ID: ${variantData.variant.product_id}, Inventory Item ID: ${variantData.variant.inventory_item_id}`);
-    
-    // Lưu vào cache với thời hạn 5 phút
-    if (useCache) {
-      apiCache.set(cacheKey, variantData.variant, 5 * 60 * 1000);
-      console.log(`[Cache] Đã lưu thông tin biến thể ${normalizedId} vào cache (5 phút)`);
-    }
-    
-    return variantData.variant;
+    return inventoryQuantity;
   } catch (error) {
-    console.error(`[API ERROR] Lỗi khi lấy thông tin Shopify (Variant ID: ${normalizedId}):`, error.message);
-    throw error;
-  }
-}
-
-// Thêm hàm tạo hash từ dữ liệu
-function createHash(data) {
-  try {
-    // Sử dụng thuật toán đơn giản để tính hash
-    // Trong thực tế bạn có thể sử dụng crypto hoặc các thư viện hash
-    const str = typeof data === 'string' ? data : JSON.stringify(data);
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
-    }
-    return hash.toString(16); // Chuyển đổi sang hex
-  } catch (e) {
-    console.error('[Hash] Lỗi khi tạo hash:', e);
-    return null;
+    console.error(`[INVENTORY] Lỗi khi xử lý tồn kho cho sản phẩm ${productId}:`, error);
+    return 0; // Trả về 0 nếu có lỗi
   }
 }
 
 /**
- * Kiểm tra xem dữ liệu tồn kho có thay đổi không
+ * Kiểm tra xem tồn kho có thay đổi không
+ * @param {Object} product - Thông tin sản phẩm
+ * @param {Object} nhanhData - Dữ liệu Nhanh.vn hiện tại
+ * @param {Object} settings - Cài đặt API
+ * @returns {Promise<Object>} - Kết quả kiểm tra với changed = true/false
  */
-async function hasInventoryChanged(product, nhanhData, currentInventory, configSettings) {
+async function checkInventoryChange(product, nhanhData, settings) {
   try {
-    // Lấy thông tin tồn kho từ Nhanh.vn
+    console.log(`[INVENTORY_CHECK] Kiểm tra thay đổi tồn kho cho sản phẩm ${product.id}`);
+    
+    if (!nhanhData || !nhanhData.idNhanh) {
+      console.log(`[INVENTORY_CHECK] Thiếu dữ liệu Nhanh.vn hoặc ID Nhanh cho sản phẩm ${product.id}`);
+      return { changed: true, reason: 'missing_data' };
+    }
+    
+    // Lấy số lượng tồn kho hiện tại từ Shopify
+    let currentInventory = 0;
+    try {
+      // Kiểm tra xem có shopifyId không
+      if (!product.shopifyId) {
+        console.log(`[INVENTORY_CHECK] Thiếu Shopify ID cho sản phẩm ${product.id}`);
+        return { changed: true, reason: 'missing_shopify_id' };
+      }
+      
+      // Lấy thông tin biến thể Shopify
+      const shopifyVariant = await getShopifyProduct(product.shopifyId, settings);
+      
+      if (!shopifyVariant || !shopifyVariant.inventory_item_id) {
+        console.log(`[INVENTORY_CHECK] Không tìm thấy biến thể Shopify hoặc inventory_item_id cho sản phẩm ${product.id}`);
+        return { changed: true, reason: 'missing_inventory_item' };
+      }
+      
+      // Cấu hình Shopify từ settings
+      const SHOPIFY_STORE = settings.shopify_store;
+      const SHOPIFY_ACCESS_TOKEN = settings.shopify_access_token;
+      const SHOPIFY_LOCATION_ID = settings.shopify_location_id;
+      
+      // Lấy thông tin inventory hiện tại từ Shopify
+      const inventoryResponse = await callShopifyAPI(
+        `https://${SHOPIFY_STORE}.myshopify.com/admin/api/2024-01/inventory_levels.json?inventory_item_ids=${shopifyVariant.inventory_item_id}`,
+        {
+          method: 'GET',
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      if (!inventoryResponse.ok) {
+        console.log(`[INVENTORY_CHECK] Lỗi khi lấy thông tin tồn kho từ Shopify: ${inventoryResponse.status}`);
+        return { changed: true, reason: 'shopify_api_error' };
+      }
+      
+      const inventoryData = await inventoryResponse.json();
+      if (inventoryData.inventory_levels && inventoryData.inventory_levels.length > 0) {
+        currentInventory = parseInt(inventoryData.inventory_levels[0].available, 10);
+        console.log(`[INVENTORY_CHECK] Tồn kho hiện tại từ Shopify: ${currentInventory}`);
+      } else {
+        console.log(`[INVENTORY_CHECK] Không tìm thấy thông tin tồn kho từ Shopify, giả định là 0`);
+      }
+    } catch (error) {
+      console.error(`[INVENTORY_CHECK] Lỗi khi lấy tồn kho hiện tại:`, error);
+      return { changed: true, reason: 'error_fetching_current' };
+    }
+    
+    // Lấy thông tin mới nhất từ Nhanh.vn
     let nhanhResponse;
     try {
-      nhanhResponse = await getNhanhData(nhanhData.idNhanh, configSettings);
+      nhanhResponse = await getNhanhData(nhanhData.idNhanh, settings);
+      
+      if (nhanhResponse.code !== 1) {
+        console.log(`[INVENTORY_CHECK] API Nhanh.vn trả về mã lỗi: ${nhanhResponse.code}`);
+        return { changed: true, reason: 'nhanh_api_error' };
+      }
     } catch (error) {
-      console.error(`[Sync] Lỗi khi lấy dữ liệu từ Nhanh.vn:`, error);
-      // Nếu không lấy được dữ liệu, giả định là có thay đổi
-      return { changed: true, reason: 'error_fetching_data' };
+      console.error(`[INVENTORY_CHECK] Lỗi khi lấy dữ liệu từ Nhanh.vn:`, error);
+      return { changed: true, reason: 'error_fetching_nhanh' };
     }
-
-    if (nhanhResponse.code !== 1) {
-      console.error(`[ERROR] Lỗi từ API Nhanh.vn:`, nhanhResponse);
-      throw new Error(`Lỗi từ API Nhanh.vn: ${nhanhResponse.messages || 'Không xác định'}`);
-    }
-
-    // Xử lý dữ liệu để lấy số lượng tồn kho
-    let inventoryQuantity = 0;
+    
+    // Tìm sản phẩm từ dữ liệu trả về
     let productData = null;
-
     if (nhanhResponse.data && nhanhResponse.data.products) {
       const products = nhanhResponse.data.products;
       
@@ -431,88 +279,30 @@ async function hasInventoryChanged(product, nhanhData, currentInventory, configS
           }
         }
       }
-
-      if (!productData && Object.keys(products).length > 0) {
-        productData = products[Object.keys(products)[0]]; // Lấy sản phẩm đầu tiên nếu không tìm thấy
-      }
-
-      if (productData) {
-        console.log(`[API] Đã tìm thấy sản phẩm ${nhanhData.idNhanh} trong dữ liệu Nhanh.vn`);
-        
-        // Kiểm tra cấu trúc dữ liệu inventory từ Nhanh.vn
-        if (productData.inventory) {
-          console.log(`[API] Cấu trúc dữ liệu inventory:`, typeof productData.inventory);
-          
-          // Trường hợp 1: inventory là một đối tượng có trường remain
-          if (typeof productData.inventory === 'object' && productData.inventory !== null && 'remain' in productData.inventory) {
-            inventoryQuantity = Number(productData.inventory.remain);
-            console.log(`[API] Lấy tồn kho từ trường inventory.remain: ${inventoryQuantity}`);
-          }
-          // Trường hợp 2: inventory có depots (nhiều kho)
-          else if (typeof productData.inventory === 'object' && productData.inventory !== null && productData.inventory.depots) {
-            // Lấy tổng số lượng từ tất cả các kho hoặc kho mặc định
-            if (productData.inventory.depots['175080']) {
-              inventoryQuantity = Number(productData.inventory.depots['175080'].available || 0);
-              console.log(`[API] Lấy tồn kho từ kho 175080: ${inventoryQuantity}`);
-            } else {
-              // Tính tổng từ tất cả các kho
-              let total = 0;
-              Object.values(productData.inventory.depots).forEach(depot => {
-                if (depot && typeof depot === 'object' && 'available' in depot) {
-                  const depotValue = Number(depot.available || 0);
-                  if (!isNaN(depotValue)) {
-                    total += depotValue;
-                  }
-                }
-              });
-              inventoryQuantity = total;
-              console.log(`[API] Lấy tổng tồn kho từ tất cả kho: ${inventoryQuantity}`);
-            }
-          }
-          // Trường hợp 3: inventory là một số hoặc có thể chuyển đổi thành số
-          else {
-            inventoryQuantity = Number(productData.inventory);
-            console.log(`[API] Lấy tồn kho trực tiếp từ trường inventory: ${inventoryQuantity}`);
-          }
-        } else {
-          console.log(`[API] Không tìm thấy thông tin tồn kho cho sản phẩm ${nhanhData.idNhanh}`);
-        }
-      } else {
-        console.log(`[API] Không tìm thấy thông tin sản phẩm ${nhanhData.idNhanh} trong dữ liệu Nhanh.vn`);
-      }
-    } else {
-      console.log(`[API] Không có dữ liệu sản phẩm trong phản hồi từ Nhanh.vn`);
     }
     
-    // Đảm bảo inventoryQuantity là số hợp lệ
-    if (isNaN(inventoryQuantity)) {
-      console.log(`[API] Cảnh báo: Tồn kho từ Nhanh.vn cho sản phẩm ${nhanhData.idNhanh} là NaN, đã được đặt về 0`);
-      inventoryQuantity = 0;
+    if (!productData) {
+      console.log(`[INVENTORY_CHECK] Không tìm thấy sản phẩm từ dữ liệu Nhanh.vn`);
+      return { changed: true, reason: 'product_not_found' };
     }
     
-    // Đảm bảo inventoryQuantity là số nguyên không âm
-    inventoryQuantity = Math.max(0, Math.floor(inventoryQuantity));
-    console.log(`[API] Giá trị tồn kho cuối cùng cho sản phẩm ${nhanhData.idNhanh}: ${inventoryQuantity}`);
-
-    // So sánh với số lượng hiện tại
-    const hasChanged = currentInventory !== inventoryQuantity;
+    // Sử dụng hàm getInventoryQuantity để lấy số lượng từ productData
+    const newInventory = getInventoryQuantity(productData, '175080', product.id);
     
-    if (hasChanged) {
-      console.log(`[Sync] Phát hiện thay đổi tồn kho cho sản phẩm ${product.shopifyId}: ${currentInventory} -> ${inventoryQuantity}`);
-    } else {
-      console.log(`[Sync] Không có thay đổi tồn kho cho sản phẩm ${product.shopifyId}: ${currentInventory}`);
-    }
+    // So sánh giá trị mới và cũ
+    const hasChanged = currentInventory !== newInventory;
     
-    return { 
-      changed: hasChanged, 
+    console.log(`[INVENTORY_CHECK] So sánh tồn kho: hiện tại=${currentInventory}, mới=${newInventory}, thay đổi=${hasChanged}`);
+    
+    return {
+      changed: hasChanged,
       reason: hasChanged ? 'inventory_changed' : 'no_change',
-      newQuantity: inventoryQuantity,
-      oldQuantity: currentInventory
+      oldQuantity: currentInventory,
+      newQuantity: newInventory
     };
   } catch (error) {
-    console.error(`[Sync] Lỗi khi kiểm tra thay đổi tồn kho:`, error);
-    // Nếu có lỗi, giả định là có thay đổi để đảm bảo an toàn
-    return { changed: true, reason: 'error_checking' };
+    console.error(`[INVENTORY_CHECK] Lỗi khi kiểm tra thay đổi tồn kho:`, error);
+    return { changed: true, reason: 'check_error' };
   }
 }
 
@@ -636,77 +426,8 @@ async function syncInventory(product, nhanhData, settings, username = 'system', 
       
       const inventoryItemId = shopifyVariant.inventory_item_id;
       
-      // Lấy số lượng tồn kho từ Nhanh.vn
-      let nhanhInventory = null;
-      let selectedWarehouseId = null;
-      
-      // Trích xuất inventory từ nhanhData theo cấu trúc đúng
-      if (nhanhData) {
-        if (nhanhData.inventory) {
-          // Trường hợp có trường inventory trực tiếp
-          const inventoryData = nhanhData.inventory;
-          
-          if (typeof inventoryData === 'number') {
-            // Nếu inventory là số
-            nhanhInventory = inventoryData;
-          } else if (typeof inventoryData === 'object' && inventoryData !== null) {
-            // Nếu inventory là object
-            if ('remain' in inventoryData) {
-              nhanhInventory = inventoryData.remain;
-            } else if (inventoryData.depots) {
-              // Tính tồn kho dựa trên ID kho
-              if (warehouseId === 'all') {
-                // Nếu yêu cầu lấy tổng từ tất cả kho
-                let total = 0;
-                Object.entries(inventoryData.depots).forEach(([depotId, depot]) => {
-                  if (depot && typeof depot === 'object' && 'available' in depot) {
-                    const depotValue = Number(depot.available || 0);
-                    if (!isNaN(depotValue)) {
-                      total += depotValue;
-                    }
-                  }
-                });
-                nhanhInventory = total;
-                console.log(`[API] Lấy tổng tồn kho từ tất cả kho: ${nhanhInventory}`);
-              } else if (inventoryData.depots[warehouseId] && inventoryData.depots[warehouseId].available !== undefined) {
-                // Nếu tìm thấy kho cụ thể
-                nhanhInventory = Number(inventoryData.depots[warehouseId].available || 0);
-                selectedWarehouseId = warehouseId;
-                console.log(`[API] Lấy tồn kho từ kho ${warehouseId}: ${nhanhInventory}`);
-              } else if (inventoryData.depots['175080'] && inventoryData.depots['175080'].available !== undefined) {
-                // Fallback về kho mặc định 175080
-                nhanhInventory = Number(inventoryData.depots['175080'].available || 0);
-                selectedWarehouseId = '175080';
-                console.log(`[API] Không tìm thấy kho ${warehouseId}, fallback về kho mặc định 175080: ${nhanhInventory}`);
-              } else {
-                // Nếu không có cả kho cụ thể và kho mặc định, tính tổng
-                let total = 0;
-                Object.entries(inventoryData.depots).forEach(([depotId, depot]) => {
-                  if (depot && typeof depot === 'object' && 'available' in depot) {
-                    const depotValue = Number(depot.available || 0);
-                    if (!isNaN(depotValue)) {
-                      total += depotValue;
-                    }
-                  }
-                });
-                nhanhInventory = total;
-                console.log(`[API] Không tìm thấy kho ${warehouseId} hoặc kho mặc định, lấy tổng từ tất cả kho: ${nhanhInventory}`);
-              }
-            }
-          }
-        } else if (product.inventory) {
-          // Trích xuất từ trường inventory trong product
-          nhanhInventory = product.inventory;
-        }
-      }
-      
-      // Đảm bảo nhanhInventory là số hợp lệ
-      let inventoryQuantity = parseInt(nhanhInventory || 0, 10);
-      if (isNaN(inventoryQuantity)) {
-        console.warn(`[WARN] Số lượng tồn kho không hợp lệ cho sản phẩm ${product.id}, đặt về 0`);
-        inventoryQuantity = 0;
-      }
-      
+      // Lấy số lượng tồn kho từ Nhanh.vn sử dụng hàm getInventoryQuantity
+      const inventoryQuantity = getInventoryQuantity(nhanhData, warehouseId, product.id);
       console.log(`[API] Đồng bộ tồn kho cho biến thể ${product.shopifyId}: ${inventoryQuantity}`);
       
       // Cấu hình Shopify từ settings
